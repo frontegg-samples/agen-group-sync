@@ -1,0 +1,39 @@
+{
+	"name": "agen-group-sync",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=20.10"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"start": "npm run build --silent && node dist/bin.js",
+		"sync": "node dist/bin.js",
+		"test": "vitest run",
+		"coverage": "vitest run --coverage",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@types/node": "^22.20.4",
+		"@vitest/coverage-v8": "^2.1.8",
+		"typescript": "^5.7.2",
+		"vitest": "^2.1.8"
+	},
+	"description": "Reconciles Google Workspace groups into a Frontegg tenant. Runs in your own infrastructure.",
+	"bin": {
+		"agen-group-sync": "dist/bin.js"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/frontegg-samples/agen-group-sync.git"
+	},
+	"keywords": [
+		"frontegg",
+		"google-workspace",
+		"directory-sync",
+		"groups",
+		"scim-alternative"
+	]
+}
