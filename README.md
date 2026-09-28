@@ -66,6 +66,98 @@ When the numbers look right, drop `--dry-run`.
 **[docs/OPERATIONS.md](docs/OPERATIONS.md)** is the full manual: permissions to grant, rollout
 sequence, what each alarm means, and troubleshooting.
 
+## Setting up Google credentials
+
+The sync reads your directory as a **service account with domain-wide delegation**, impersonating a
+super-admin. The Directory API will not answer a bare service-account token, so both halves — the
+key _and_ the delegation — are required.
+
+It needs **three read-only scopes**. Groups and their members tell it who should be in what; the
+user scope resolves those member emails to real people, so new Frontegg users are created with a
+name and suspended accounts are never granted access.
+
+```
+https://www.googleapis.com/auth/admin.directory.group.readonly
+https://www.googleapis.com/auth/admin.directory.group.member.readonly
+https://www.googleapis.com/auth/admin.directory.user.readonly
+```
+
+All three are `.readonly`. This tool never writes to Google.
+
+### 1 · Create the service account and key
+
+In the **[Google Cloud Console](https://console.cloud.google.com/)**, using any project (a
+dedicated one is tidier):
+
+1. **APIs & Services → Library** → search **Admin SDK API** → **Enable**.
+   Without this every call returns `403 accessNotConfigured`.
+2. **APIs & Services → Credentials → Create credentials → Service account**.
+   Name it something recognisable, e.g. `frontegg-group-sync`. No project roles are needed — its
+   access comes from the delegation in step 2, not from IAM.
+3. Open the new service account → **Keys → Add key → Create new key → JSON**. The file downloads
+   once and cannot be re-downloaded.
+4. Still on the service account, copy the **Unique ID** from the _Details_ tab. It is a long number
+   like `109876543210987654321`. **You need this in step 2, and it is not the email address.**
+
+From the downloaded JSON you need exactly two fields:
+
+| JSON field     | Environment variable                                          |
+| -------------- | ------------------------------------------------------------- |
+| `client_email` | `GOOGLE_CLIENT_EMAIL`                                         |
+| `private_key`  | `GOOGLE_PRIVATE_KEY_FILE` (preferred) or `GOOGLE_PRIVATE_KEY` |
+
+> [!TIP]
+> Write the private key to its own file and point `GOOGLE_PRIVATE_KEY_FILE` at it — that is the
+> shape a secret manager mounts. If you must inline it, the `\n` escapes are handled for you, but
+> the tool warns on every run.
+
+### 2 · Authorise domain-wide delegation
+
+This is the step people get wrong, and it produces the single most common error.
+
+In the **[Google Admin Console](https://admin.google.com/)**, as a super-admin:
+
+**Security → Access and data control → API controls → Domain-wide delegation → Manage
+domain-wide delegation → Add new**
+
+| Field            | Value                                                                    |
+| ---------------- | ------------------------------------------------------------------------ |
+| **Client ID**    | The **Unique ID number** from step 1.4 — _not_ the service account email |
+| **OAuth scopes** | The three scopes above, **comma-separated on one line, no spaces**       |
+
+Paste the scopes exactly as:
+
+```
+https://www.googleapis.com/auth/admin.directory.group.readonly,https://www.googleapis.com/auth/admin.directory.group.member.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly
+```
+
+Then **Authorise**. Propagation is usually seconds but can take a few minutes.
+
+### 3 · Pick the admin to impersonate
+
+Set `GOOGLE_IMPERSONATE_SUBJECT` to a **super-admin's** email address. The service account acts as
+this person when reading the directory, which is what makes `GOOGLE_CUSTOMER_ID=my_customer`
+resolve to your organisation.
+
+A delegated user who is not a super-admin will usually authenticate and then return `403` on the
+group or user reads.
+
+### 4 · Verify before you configure anything else
+
+```bash
+node --env-file=.env dist/bin.js --dry-run
+```
+
+A working setup prints a group count and a user count. If it does not:
+
+| Error                     | What it means                                                                                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unauthorized_client`     | The Client ID in the delegation entry is wrong — almost always the service account **email** was pasted instead of the **numeric Unique ID**. Recheck step 1.4.                 |
+| `invalid_grant`           | `GOOGLE_IMPERSONATE_SUBJECT` is not a real user in this domain, or the clock on the host is badly skewed.                                                                       |
+| `403 accessNotConfigured` | The Admin SDK API is not enabled on the Cloud project. Step 1.1.                                                                                                                |
+| `403` on groups or users  | The scopes in the delegation entry do not match the three above exactly, or the impersonated user is not a super-admin. A typo or trailing space in the scope string is enough. |
+| Groups read but `0 users` | The `admin.directory.user.readonly` scope was not included. Re-add all three together — editing a delegation entry replaces the whole scope list.                               |
+
 ## How it works
 
 Each pass reads both directories, computes a plan, checks it, and applies it in a fixed order:

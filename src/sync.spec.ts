@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import type { FronteggClient, FronteggUser } from './frontegg.js';
-import type { DirectorySnapshot } from './google.js';
+import type { DirectorySnapshot, GoogleUser } from './google.js';
 import { Store, type StateIo } from './state.js';
 import { formatPlan, runPass, type SyncDeps } from './sync.js';
 import { type FronteggGroup, type GoogleGroup, OWNER_MARKER, SENTINEL_GROUP_NAME, type Plan } from './types.js';
@@ -45,6 +45,7 @@ const owned = (googleGroupId: string) => JSON.stringify({ owner: OWNER_MARKER, g
 const build = (
 	over: {
 		googleGroups?: GoogleGroup[];
+		googleUsers?: Map<string, GoogleUser>;
 		skippedMembers?: DirectorySnapshot['skippedMembers'];
 		fronteggGroups?: FronteggGroup[];
 		fronteggUsers?: FronteggUser[];
@@ -77,7 +78,11 @@ const build = (
 
 	const deps: SyncDeps = {
 		google: {
-			snapshot: vi.fn(async () => ({ groups: over.googleGroups ?? [], skippedMembers: over.skippedMembers ?? [] })),
+			snapshot: vi.fn(async () => ({
+				groups: over.googleGroups ?? [],
+				users: over.googleUsers ?? new Map<string, GoogleUser>(),
+				skippedMembers: over.skippedMembers ?? [],
+			})),
 		},
 		frontegg,
 		store: over.store ?? memStore().store,
@@ -118,6 +123,26 @@ describe('applying', () => {
 		expect((frontegg.createGroup as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toContain(
 			SENTINEL_GROUP_NAME,
 		);
+	});
+
+	it('creates a new user with the name Google has for them', async () => {
+		const { deps, frontegg } = build({
+			googleGroups: [g('G1', 'agen-eng', ['ada@x.io'])],
+			googleUsers: new Map([['ada@x.io', { email: 'ada@x.io', name: 'Ada Lovelace', inactive: false }]]),
+		});
+		await runPass(deps, { dryRun: false });
+		expect(frontegg.createUser).toHaveBeenCalledWith('ada@x.io', 'Ada Lovelace');
+	});
+
+	it('reports the user count read from Google in the pass log', async () => {
+		const lines: string[] = [];
+		const { deps } = build({
+			googleGroups: [g('G1', 'agen-eng')],
+			googleUsers: new Map([['a@x.io', { email: 'a@x.io', inactive: false }]]),
+		});
+		deps.log = (l) => lines.push(l);
+		await runPass(deps, { dryRun: true });
+		expect(lines.join('\n')).toMatch(/1 groups, 1 users/);
 	});
 
 	it('reports partial and still records the marker when the write budget runs out', async () => {

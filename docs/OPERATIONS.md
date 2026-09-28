@@ -43,6 +43,9 @@ lock — and revocation is the thing you least want left undone.
 - **Write to Google.** It holds read-only scopes and cannot corrupt your directory.
 - **Flatten nested groups.** A Google group containing another group syncs only its direct
   individual members. The nested entries are reported in the pass summary so you can see them.
+- **Grant access to a suspended or archived Google account.** Membership status and account status
+  are different facts — Google will report a suspended person as an `ACTIVE` member of a group. The
+  sync checks the account itself and skips them, reporting `account=suspended`.
 
 > [!IMPORTANT]
 > Adding a user to a Frontegg group grants them that group's roles. Whoever administers your Google
@@ -63,6 +66,11 @@ lock — and revocation is the thing you least want left undone.
 | **A naming convention in Google**       | A prefix such as `agen-` on every group you want synced. Minimum two characters.                                                           |
 | **Somewhere to persist one small file** | The tool keeps a lock and a tripped-guard flag on disk. It must survive between passes.                                                    |
 | **Somewhere to run it on a schedule**   | Cron, a systemd timer, a container with a volume, or a scheduled task. See §6 for the concurrency constraint.                              |
+
+> [!NOTE]
+> Each pass makes one paginated sweep of your Google user directory, in addition to reading groups
+> and their members. On a very large directory that sweep is the most expensive part of a pass. It is
+> done once per pass rather than once per member, which would be far slower and hit quota sooner.
 
 ### 2.1 Your real offboarding lag is longer than the sync interval
 
@@ -86,17 +94,28 @@ halfway through a pass; too many and the sync can escalate its own privileges.
 
 ### 3.1 Google Workspace
 
-Create a service account, enable domain-wide delegation, and authorise exactly these two scopes in
-the Google Admin console under **Security → Access and data control → API controls → Domain-wide
-delegation**:
+Create a service account, enable domain-wide delegation, and authorise exactly these **three**
+scopes. The step-by-step walkthrough, including where each value comes from and how to verify it, is
+in the [README](../README.md#setting-up-google-credentials).
 
 ```
 https://www.googleapis.com/auth/admin.directory.group.readonly
 https://www.googleapis.com/auth/admin.directory.group.member.readonly
+https://www.googleapis.com/auth/admin.directory.user.readonly
 ```
 
-Both are read-only. This tool never writes to Google, and granting it a write scope would put your
-directory at risk for no benefit.
+| Scope                   | Why it is needed                                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `group.readonly`        | List the groups in your directory                                                                                                  |
+| `group.member.readonly` | List who is in each group — the desired state                                                                                      |
+| `user.readonly`         | Resolve member emails to people: create Frontegg users with a real name, and never grant access to a suspended or archived account |
+
+All three are read-only. This tool never writes to Google, and granting it a write scope would put
+your directory at risk for no benefit.
+
+> [!NOTE]
+> Editing a delegation entry **replaces** its whole scope list. If you add the user scope later,
+> re-paste all three together or the group scopes are silently dropped.
 
 You also need a super-admin for the service account to impersonate
 (`GOOGLE_IMPERSONATE_SUBJECT`). Domain-wide delegation requires one; the Directory API will not
