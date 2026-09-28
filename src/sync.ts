@@ -119,7 +119,10 @@ export async function runPass(deps: SyncDeps, options: { dryRun: boolean }): Pro
 	try {
 		log('reading Google Workspace directory...');
 		const snapshot = await deps.google.snapshot();
-		log(`  ${snapshot.groups.length} groups, ${snapshot.skippedMembers.length} non-user members skipped`);
+		log(
+			`  ${snapshot.groups.length} groups, ${snapshot.users.size} users, ` +
+				`${snapshot.skippedMembers.length} members skipped`,
+		);
 
 		log('reading Frontegg tenant...');
 		const [fronteggGroups, fronteggUsers] = await Promise.all([deps.frontegg.listGroups(), deps.frontegg.listUsers()]);
@@ -169,6 +172,7 @@ export async function runPass(deps: SyncDeps, options: { dryRun: boolean }): Pro
 		const applied = await apply(plan, deps.frontegg, fronteggUsers, {
 			maxWrites: deps.config.sync.maxWritesPerPass,
 			now,
+			nameFor: (email) => snapshot.users.get(email)?.name,
 		});
 		for (const warning of applied.warnings) messages.push(`warn: ${warning}`);
 

@@ -32,6 +32,8 @@ const routed = (routes: Array<[RegExp, unknown]>, clock = { ms: 1_700_000_000_00
 };
 
 const tokenRoute = (): [RegExp, unknown] => [/oauth2\.googleapis\.com/, { access_token: 'tok-1', expires_in: 3600 }];
+/** The directory sweep. Present in every harness because snapshot() always performs it. */
+const usersRoute = (users: unknown[] = []): [RegExp, unknown] => [/directory\/v1\/users/, { users }];
 
 describe('assertion', () => {
 	it('signs an RS256 JWT carrying the impersonated subject and only readonly scopes', () => {
@@ -50,6 +52,10 @@ describe('assertion', () => {
 		expect(sig!.length).toBeGreaterThan(300);
 	});
 
+	it('requests the user scope, so member emails can be resolved to real people', () => {
+		expect(GOOGLE_SCOPES).toContain('https://www.googleapis.com/auth/admin.directory.user.readonly');
+	});
+
 	it('requests no write scope at all', () => {
 		// Google is the source of truth. A write scope here is a corruption risk with no use case.
 		expect(GOOGLE_SCOPES).not.toMatch(/directory\.group($|\s)/);
@@ -61,6 +67,7 @@ describe('snapshot', () => {
 	it('reads groups and their active user members', async () => {
 		const { http } = routed([
 			tokenRoute(),
+			usersRoute(),
 			[/\/groups\/G1\/members/, { members: [{ email: 'a@x.io', type: 'USER', status: 'ACTIVE' }] }],
 			[/\/groups\?/, { groups: [{ id: 'G1', email: 'agen-eng@example.com' }] }],
 		]);
@@ -73,6 +80,7 @@ describe('snapshot', () => {
 		// Flattening would change who has access without anyone requesting it.
 		const { http } = routed([
 			tokenRoute(),
+			usersRoute(),
 			[
 				/\/groups\/G1\/members/,
 				{
@@ -98,6 +106,7 @@ describe('snapshot', () => {
 	it('returns every group, unfiltered, so the differ can tell an empty directory from a bad prefix', async () => {
 		const { http } = routed([
 			tokenRoute(),
+			usersRoute(),
 			[/members/, { members: [] }],
 			[
 				/\/groups\?/,
@@ -116,6 +125,7 @@ describe('snapshot', () => {
 	it('skips directory rows missing an id or an email rather than emitting a broken group', async () => {
 		const { http } = routed([
 			tokenRoute(),
+			usersRoute(),
 			[/members/, { members: [] }],
 			[/\/groups\?/, { groups: [{ id: 'G1' }, { email: 'no-id@d.test' }, { id: 'G3', email: 'ok@d.test' }] }],
 		]);
@@ -130,6 +140,7 @@ describe('snapshot', () => {
 			const href = String(url);
 			if (/oauth2/.test(href))
 				return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
+			if (/directory\/v1\/users/.test(href)) return new Response(JSON.stringify({ users: [] }), { status: 200 });
 			if (/members/.test(href)) {
 				memberCall++;
 				return new Response(
@@ -159,9 +170,123 @@ describe('snapshot', () => {
 	});
 
 	it("requests Google's maximum page size so a large directory is not read one row at a time", async () => {
-		const { http, seen } = routed([tokenRoute(), [/members/, { members: [] }], [/\/groups\?/, { groups: [] }]]);
+		const { http, seen } = routed([
+			tokenRoute(),
+			usersRoute(),
+			[/members/, { members: [] }],
+			[/\/groups\?/, { groups: [] }],
+		]);
 		await new GoogleDirectory(http, creds).snapshot();
 		expect(seen.find((u) => u.includes('/groups?'))).toContain('maxResults=200');
+	});
+});
+
+describe('the user directory', () => {
+	it('resolves a display name from fullName', async () => {
+		const { http } = routed([
+			tokenRoute(),
+			usersRoute([{ primaryEmail: 'a@x.io', name: { fullName: 'Ada Lovelace' } }]),
+			[/members/, { members: [{ email: 'a@x.io', type: 'USER', status: 'ACTIVE' }] }],
+			[/\/groups\?/, { groups: [{ id: 'G1', email: 'agen-eng@example.com' }] }],
+		]);
+		const snap = await new GoogleDirectory(http, creds).snapshot();
+		expect(snap.users.get('a@x.io')).toEqual({ email: 'a@x.io', name: 'Ada Lovelace', inactive: false });
+	});
+
+	it('falls back to given + family when fullName is absent', async () => {
+		const { http } = routed([
+			tokenRoute(),
+			usersRoute([{ primaryEmail: 'b@x.io', name: { givenName: 'Grace', familyName: 'Hopper' } }]),
+			[/members/, { members: [] }],
+			[/\/groups\?/, { groups: [] }],
+		]);
+		const snap = await new GoogleDirectory(http, creds).snapshot();
+		expect(snap.users.get('b@x.io')?.name).toBe('Grace Hopper');
+	});
+
+	it('omits the name entirely when Google has none, rather than inventing an empty one', async () => {
+		const { http } = routed([
+			tokenRoute(),
+			usersRoute([{ primaryEmail: 'c@x.io' }, { primaryEmail: 'd@x.io', name: { fullName: '   ' } }]),
+			[/members/, { members: [] }],
+			[/\/groups\?/, { groups: [] }],
+		]);
+		const snap = await new GoogleDirectory(http, creds).snapshot();
+		expect(snap.users.get('c@x.io')).toEqual({ email: 'c@x.io', inactive: false });
+		expect(snap.users.get('d@x.io')).toEqual({ email: 'd@x.io', inactive: false });
+	});
+
+	it('keys on the normalised email so casing in Google cannot cause a miss', async () => {
+		const { http } = routed([
+			tokenRoute(),
+			usersRoute([{ primaryEmail: 'Ada@X.IO', name: { fullName: 'Ada' } }]),
+			[/members/, { members: [] }],
+			[/\/groups\?/, { groups: [] }],
+		]);
+		const snap = await new GoogleDirectory(http, creds).snapshot();
+		expect(snap.users.get('ada@x.io')?.name).toBe('Ada');
+	});
+
+	it.each([
+		['suspended', { suspended: true }],
+		['archived', { archived: true }],
+	])('EXCLUDES a %s account from a group it is still a member of', async (label, flags) => {
+		// Membership status and account status are different facts: Google reports the member as
+		// ACTIVE in the group while the underlying account is disabled. Syncing it would grant a
+		// disabled person access through a synced group.
+		const { http } = routed([
+			tokenRoute(),
+			usersRoute([{ primaryEmail: 'gone@x.io', ...flags }, { primaryEmail: 'here@x.io' }]),
+			[
+				/members/,
+				{
+					members: [
+						{ email: 'gone@x.io', type: 'USER', status: 'ACTIVE' },
+						{ email: 'here@x.io', type: 'USER', status: 'ACTIVE' },
+					],
+				},
+			],
+			[/\/groups\?/, { groups: [{ id: 'G1', email: 'agen-eng@example.com' }] }],
+		]);
+		const snap = await new GoogleDirectory(http, creds).snapshot();
+		expect(snap.groups[0]!.memberEmails).toEqual(['here@x.io']);
+		expect(snap.skippedMembers).toEqual([
+			{ group: 'agen-eng@example.com', email: 'gone@x.io', reason: 'account=suspended' },
+		]);
+		expect(label).toBeTruthy();
+	});
+
+	it('keeps a member whose account is simply absent from the user sweep', async () => {
+		// A member with no matching directory user is not evidence of a disabled account — it may be
+		// an external member. Dropping it silently would remove real people from real groups.
+		const { http } = routed([
+			tokenRoute(),
+			usersRoute([]),
+			[/members/, { members: [{ email: 'external@partner.example', type: 'USER', status: 'ACTIVE' }] }],
+			[/\/groups\?/, { groups: [{ id: 'G1', email: 'agen-eng@example.com' }] }],
+		]);
+		const snap = await new GoogleDirectory(http, creds).snapshot();
+		expect(snap.groups[0]!.memberEmails).toEqual(['external@partner.example']);
+		expect(snap.skippedMembers).toEqual([]);
+	});
+
+	it('sweeps the directory once per pass, not once per member', async () => {
+		const { http, seen } = routed([
+			tokenRoute(),
+			usersRoute([{ primaryEmail: 'a@x.io' }]),
+			[/members/, { members: [{ email: 'a@x.io', type: 'USER' }] }],
+			[
+				/\/groups\?/,
+				{
+					groups: [
+						{ id: 'G1', email: 'agen-a@example.com' },
+						{ id: 'G2', email: 'agen-b@example.com' },
+					],
+				},
+			],
+		]);
+		await new GoogleDirectory(http, creds).snapshot();
+		expect(seen.filter((u) => /directory\/v1\/users/.test(u))).toHaveLength(1);
 	});
 });
 
@@ -169,6 +294,7 @@ describe('token caching', () => {
 	it('mints once and reuses it across many reads', async () => {
 		const { http, seen } = routed([
 			tokenRoute(),
+			usersRoute(),
 			[/members/, { members: [] }],
 			[
 				/\/groups\?/,
@@ -189,6 +315,7 @@ describe('token caching', () => {
 		const { http, seen } = routed(
 			[
 				[/oauth2/, { access_token: 'tok', expires_in: 100 }],
+				usersRoute(),
 				[/members/, { members: [] }],
 				[/\/groups\?/, { groups: [] }],
 			],
@@ -202,7 +329,12 @@ describe('token caching', () => {
 	});
 
 	it('mints ONE token for concurrent snapshots rather than one each', async () => {
-		const { http, seen } = routed([tokenRoute(), [/members/, { members: [] }], [/\/groups\?/, { groups: [] }]]);
+		const { http, seen } = routed([
+			tokenRoute(),
+			usersRoute(),
+			[/members/, { members: [] }],
+			[/\/groups\?/, { groups: [] }],
+		]);
 		const dir = new GoogleDirectory(http, creds);
 		await Promise.all([dir.snapshot(), dir.snapshot()]);
 		expect(seen.filter((u) => u.includes('oauth2'))).toHaveLength(1);

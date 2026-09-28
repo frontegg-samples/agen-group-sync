@@ -257,6 +257,21 @@ describe('writes', () => {
 		expect(call.body).toEqual({ email: 'n@x.io', skipInviteEmail: true });
 	});
 
+	it('sends the display name when there is one', async () => {
+		const { fe, calls } = client([tokenRoute(), [/users\/v2/, { id: 'u9', email: 'n@x.io' }]]);
+		await fe.createUser('n@x.io', 'Ada Lovelace');
+		const call = calls.find((c) => c.method === 'POST' && /users\/v2/.test(c.url))!;
+		expect(call.body).toEqual({ email: 'n@x.io', skipInviteEmail: true, name: 'Ada Lovelace' });
+	});
+
+	it('OMITS name rather than sending an empty one', async () => {
+		// An empty name shows up in the admin portal as a blank row and overwrites nothing useful.
+		const { fe, calls } = client([tokenRoute(), [/users\/v2/, { id: 'u9', email: 'n@x.io' }]]);
+		await fe.createUser('n@x.io', '');
+		const call = calls.find((c) => c.method === 'POST' && /users\/v2/.test(c.url))!;
+		expect(call.body).toEqual({ email: 'n@x.io', skipInviteEmail: true });
+	});
+
 	it('rate limits user creates to 30 per 60s', async () => {
 		const slept: number[] = [];
 		let clock = 0;

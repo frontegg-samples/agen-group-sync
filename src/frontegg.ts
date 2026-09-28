@@ -210,12 +210,14 @@ export class FronteggClient {
 	 * Rate limited per §4.1. `skipInviteEmail` is set because this is a directory sync, not an
 	 * invitation campaign — onboarding 40 people must not send 40 unexpected emails.
 	 */
-	async createUser(email: string): Promise<FronteggUser> {
+	async createUser(email: string, name?: string): Promise<FronteggUser> {
 		const res = await this.http.request<{ id?: string; email?: string }>({
 			method: 'POST',
 			url: `${this.creds.baseUrl}/identity/resources/users/v2`,
 			headers: await this.headers({ 'frontegg-application-id': this.creds.applicationId }),
-			body: { email, skipInviteEmail: true },
+			// `name` is omitted rather than sent empty: an empty string would overwrite nothing useful
+			// and shows up in the admin portal as a blank row.
+			body: { email, skipInviteEmail: true, ...(name ? { name } : {}) },
 			limiter: this.userCreateLimiter,
 		});
 		if (!res?.id) throw new Error(`createUser("${email}") returned no id`);

@@ -20,6 +20,11 @@ export interface ApplyOptions {
 	/** Hard ceiling on writes attempted in one pass. A plan that wants more deserves a human first. */
 	maxWrites: number;
 	now?: () => Date;
+	/**
+	 * Display name for an email, when the source directory has one. Kept as a lookup rather than a
+	 * Google type so this module stays unaware of where the directory came from.
+	 */
+	nameFor?: (email: string) => string | undefined;
 }
 
 export interface ApplyResult {
@@ -88,7 +93,7 @@ export async function apply(
 		// 1. Users. Membership writes take ids, so every member must exist first.
 		for (const email of plan.usersToCreate) {
 			budget();
-			const created = await fe.createUser(email);
+			const created = await fe.createUser(email, opts.nameFor?.(normaliseEmail(email)));
 			idByEmail.set(normaliseEmail(created.email), created.id);
 			result.usersCreated++;
 		}

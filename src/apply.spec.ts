@@ -166,6 +166,26 @@ describe('user id resolution', () => {
 	});
 });
 
+describe('display names', () => {
+	it('passes the resolved name through to user creation', async () => {
+		const createUser = vi.fn(async (email: string, _name?: string) => ({ id: 'u9', email }));
+		const { fe } = spy({ createUser });
+		await apply(emptyPlan({ usersToCreate: ['Ada@X.IO'] }), fe, users, {
+			maxWrites: 10,
+			now: NOW,
+			nameFor: (email) => (email === 'ada@x.io' ? 'Ada Lovelace' : undefined),
+		});
+		expect(createUser).toHaveBeenCalledWith('Ada@X.IO', 'Ada Lovelace');
+	});
+
+	it('creates the user with no name when the directory has none', async () => {
+		const createUser = vi.fn(async (email: string, _name?: string) => ({ id: 'u9', email }));
+		const { fe } = spy({ createUser });
+		await apply(emptyPlan({ usersToCreate: ['nobody@x.io'] }), fe, users, { maxWrites: 10, now: NOW });
+		expect(createUser).toHaveBeenCalledWith('nobody@x.io', undefined);
+	});
+});
+
 describe('ownership metadata', () => {
 	it('stamps owner, the immutable Google id, and a change timestamp on create', async () => {
 		const createGroup = vi.fn(async (_name: string, _metadata: string) => 'F-new-1');
